@@ -42,7 +42,7 @@ def define_options():
         # Argument parsing
         parser = ArgumentParser(description='Create sashimi plot for a given genomic region')
         # parser.register('action', 'debuginfo', DebugInfoAction)
-        parser.add_argument("-b", "--bam", type=str, required=True,
+        parser.add_argument("-b", "--bam", type=str,
                 help="""
                 Individual bam file or file with a list of bam files.
                 In the case of a list of files the format is tsv:
@@ -58,7 +58,7 @@ def define_options():
                 help="Only for --strand other than 'NONE'. Choose which signal strand to plot: <both> <plus> <minus> [default=%(default)s]")
         parser.add_argument("-M", "--min-coverage", type=int, default=1, dest="min_coverage",
                 help="Minimum number of reads supporting a junction to be drawn [default=1]")
-        parser.add_argument("-j", "--junctions-bed", type=str, dest = "junctions_bed", default="",
+        parser.add_argument("-j", "--junctions", type=str, dest = "junction_file", default="",
                 help="Junction BED file name [default=no junction file]")
         parser.add_argument("-g", "--gtf",
                 help="Gtf file with annotation (only exons is enough)")
@@ -197,6 +197,37 @@ def read_bam(f, c, s):
 
         samfile.close()
         return a, junctions
+
+
+def read_junctions(f, c, s):
+        chr, start, end = parse_coordinates(c)
+
+        # Initialize coverage array and junction dict
+        a = {"+" : [20] * (end - start)}
+        junctions = {"+": OrderedDict()}
+        if s != "NONE":
+                a["-"] = [20] * (end - start)
+                junctions["-"] = OrderedDict()
+
+        with codecs.open(f, encoding='utf-8') as openf:
+                for line in openf:
+                        line_sp = line.strip().split("\t")
+                        chr, junc_start, junc_end = parse_coordinates(line_sp[1])
+                        reads = int(line_sp[2])
+                        id = line_sp[0]
+                        junctions['+'][(int(junc_start), int(junc_end))] = reads
+
+        # Zero out coverage between junctions
+        for strand in junctions:
+                for (junc_start, junc_end) in junctions[strand]:
+                        # Convert genomic coords to array indices
+                        i_start = junc_start - start
+                        i_end = junc_end - start
+                        for i in range(i_start, i_end):
+                                a[strand][i] = 0
+
+        return a, junctions, id
+
 
 def get_bam_path(index, path):
         if os.path.isabs(path):
@@ -669,46 +700,52 @@ if __name__ == "__main__":
 
         bam_dict, overlay_dict, color_dict, id_list, label_dict = {"+":OrderedDict()}, OrderedDict(), OrderedDict(), [], OrderedDict()
         if args.strand != "NONE": bam_dict["-"] = OrderedDict()
-        if args.junctions_bed != "": junctions_list = []
 
-        for id, bam, overlay_level, color_level, label_text in read_bam_input(args.bam, args.overlay, args.color_factor, args.labels):
-                if not os.path.isfile(bam):
-                        continue
-                a, junctions = read_bam(bam, args.coordinates, args.strand)
-                if a.keys() == ["+"] and all(map(lambda x: x==0, list(a.values()[0]))):
-                        print("WARN: Sample {} has no reads in the specified area.".format(id))
-                        continue
-                id_list.append(id)
-                label_dict[id] = label_text
-                for strand in a:
-                        # Store junction information
-                        if args.strand == "NONE" or args.out_strand == 'both' or strand == strand_dict[args.out_strand]:
-                                if args.junctions_bed:
-                                        for k,v in zip(junctions[strand].keys(), junctions[strand].values()):
-                                                if v >= args.min_coverage:
-                                                        junctions_list.append('\t'.join([args.coordinates.split(':')[0], str(k[0]), str(k[1]), id, str(v), strand]))
-                        bam_dict[strand][id] = prepare_for_R(a[strand], junctions[strand], args.coordinates, args.min_coverage)
-                if color_level is None:
-                        color_dict.setdefault(id, id)
-                if overlay_level is not None:
-                        overlay_dict.setdefault(overlay_level, []).append(id)
-                        label_dict[overlay_level] = overlay_level
-                        color_dict.setdefault(overlay_level, overlay_level)
-                if overlay_level is None:
-                        color_dict.setdefault(id, color_level)
+        if args.bam:
+                for id, bam, overlay_level, color_level, label_text in read_bam_input(args.bam, args.overlay, args.color_factor, args.labels):
+                        if not os.path.isfile(bam):
+                                continue
+                        a, junctions = read_bam(bam, args.coordinates, args.strand)
+                        if a.keys() == ["+"] and all(map(lambda x: x==0, list(a.values()[0]))):
+                                print("WARN: Sample {} has no reads in the specified area.".format(id))
+                                continue
+                        id_list.append(id)
+                        label_dict[id] = label_text
+                        for strand in a:
+                                bam_dict[strand][id] = prepare_for_R(a[strand], junctions[strand], args.coordinates, args.min_coverage)
+                        if color_level is None:
+                                color_dict.setdefault(id, id)
+                        if overlay_level is not None:
+                                overlay_dict.setdefault(overlay_level, []).append(id)
+                                label_dict[overlay_level] = overlay_level
+                                color_dict.setdefault(overlay_level, overlay_level)
+                        if overlay_level is None:
+                                color_dict.setdefault(id, color_level)
 
         # No bam files
         if not bam_dict["+"]:
-                print("ERROR: No available bam files.")
-                exit(1)
+                if args.junction_file:
+                        a, junctions, id = read_junctions(args.junction_file, args.coordinates, args.strand)
+                        id_list.append(id)
+                        label_dict[id] = id
+                        color_level = None
+                        overlay_level = None
 
-        # Write junctions to BED
-        if args.junctions_bed:
-                if not args.junctions_bed.endswith('.bed'):
-                        args.junctions_bed = args.junctions_bed + '.bed'
-                jbed = open(args.junctions_bed, 'w')
-                jbed.write('\n'.join(sorted(junctions_list)))
-                jbed.close()
+                        print(a)
+                        print(junctions)
+                        for strand in a:
+                                bam_dict[strand][id] = prepare_for_R(a[strand], junctions[strand], args.coordinates, args.min_coverage)
+                        if color_level is None:
+                                color_dict.setdefault(id, id)
+                        if overlay_level is not None:
+                                overlay_dict.setdefault(overlay_level, []).append(id)
+                                label_dict[overlay_level] = overlay_level
+                                color_dict.setdefault(overlay_level, overlay_level)
+                        if overlay_level is None:
+                                color_dict.setdefault(id, color_level)
+                else:
+                        print("ERROR: No available bam files.")
+                        exit(1)
 
         if args.gtf:
                 transcripts, exons = read_gtf(args.gtf, args.coordinates)
@@ -1011,7 +1048,7 @@ if __name__ == "__main__":
                 # Heights for density, x axis and annotation
                 heights = unit.c(
                         unit(rep(%(signal_height)s, length(density_list)), "in"),
-                        x.axis.height,
+                        unit(0.5, "in"),
                         unit(%(ann_height)s*%(args.gtf)s, "in")
                         )
 
